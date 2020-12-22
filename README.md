@@ -119,6 +119,9 @@ interface of a device, under *Settings -> Device info -> Device ID*.
   types are `"contactSensor"`, `"motionSensor"`, `"occupancySensor"`,
   `"outlet"`, `"switch"` (default) and `"valve"`.
 
+#### Shelly 1 Configurations
+* `"type"` - with the input in detached mode, the device can be identified as `"garageDoorOpener"`. At that point the input acts as the sensor for a closed garage door. The output is triggered for 500ms activating the garage door.
+
 #### Shelly 2.5 configurations
 * `"type"` - in roller mode, the device can be identified as either `"door"`,
   `"garageDoorOpener"`, `"window"` or `"windowCovering"` (default).
