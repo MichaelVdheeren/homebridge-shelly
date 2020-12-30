@@ -11,15 +11,27 @@ module.exports = homebridge => {
      * garage door to open or close.
      * @param {string} stateProperty - The device property used to indicate the
      * garage door is closed.
+     * @param {string} movementTime - The time required before the door has
+     * either completely closed or opened.
+     * @param {string} pulseTime - The time a pulse is required to activate the
+     * garage door motor
      * @param {function} setSwitch - A function that updates the device's switch
      * state. Must return a Promise.
      */
-    constructor(switchProperty, stateProperty, setSwitch) {
+    constructor(switchProperty, stateProperty,
+      movementTime, pulseTime, setSwitch) {
+      const CDS = Characteristic.CurrentDoorState
+
       super()
       this._switchProperty = switchProperty
       this._stateProperty = stateProperty
       this._setSwitch = setSwitch
+      this._movementTime = movementTime
+      this._movementTimer = null
+      this._pulseTime = pulseTime
       this._targetState = null
+      this._preStoppedState = null
+      this._currentState = this.state > 0 ? CDS.CLOSED : CDS.OPEN
     }
 
     get state() {
@@ -31,13 +43,71 @@ module.exports = homebridge => {
     }
 
     get currentState() {
+      return this._currentState
+    }
+
+    _setCurrentState(newState, source) {
       const CDS = Characteristic.CurrentDoorState
 
-      if (this.state > 0) {
-        return CDS.CLOSED
+      if (this.currentState === CDS.STOPPED) {
+        // Leaving Stopped state - reset the "obstruction detected" flag.
       }
 
-      return CDS.OPEN
+      if (newState === CDS.STOPPED) {
+      // Entering Stopped state - remember what was the previous state.
+        this._preStoppedState = this.currentState
+        // var obstNotify = true
+      }
+
+      this.platformAccessory
+        .getService(Service.GarageDoorOpener)
+        .setCharacteristic(CDS)
+        .setValue(newState, null, source)
+    }
+
+    _setTargetState(newState, source) {
+      const TDS = Characteristic.TargetDoorState
+
+      this.platformAccessory
+        .getService(Service.GarageDoorOpener)
+        .setCharacteristic(TDS)
+        .setValue(newState, null, source)
+    }
+
+    _toggleState(source) {
+      const TDS = Characteristic.TargetDoorState
+      const CDS = Characteristic.CurrentDoorState
+
+      var newState = this.targetState
+      var currentState = this.currentState
+
+      switch (currentState) {
+        case CDS.OPEN:
+          this.setTargetState(newState, source)
+          this.setCurrentState(CDS.CLOSING)
+          break
+        case CDS.CLOSED:
+          this.setTargetState(newState, source)
+          this.setCurrentState(CDS.OPENING)
+          break
+        case CDS.OPENING:
+          this.setTargetState(newState, source)
+          this.setCurrentState(CDS.STOPPED)
+          break
+        case CDS.CLOSING:
+          this.setTargetState(newState, source)
+          this.setCurrentState(CDS.OPENING)
+          break
+        case CDS.STOPPED:
+          if (this._preStoppedState === CDS.OPENING) {
+            this.setTargetState(TDS.CLOSED, 'fixup')
+            this.setCurrentState(CDS.CLOSING)
+          } else {
+            this.setTargetState(TDS.OPEN, 'fixup')
+            this.setCurrentState(CDS.OPENING)
+          }
+          break
+      }
     }
 
     get targetState() {
@@ -60,7 +130,7 @@ module.exports = homebridge => {
       this.platformAccessory.addService(
         new Service.GarageDoorOpener()
           .setCharacteristic(CDS, this.currentState)
-          .setCharacteristic(TDS, TDS.CLOSED)
+          .setCharacteristic(TDS, this.targetState)
           .setCharacteristic(Characteristic.ObstructionDetected, false)
       )
     }
@@ -74,15 +144,15 @@ module.exports = homebridge => {
         .getCharacteristic(Characteristic.TargetDoorState)
         .on('set', this._targetDoorStateSetHandler.bind(this))
 
-      this.platformAccessory
-        .getService(Service.GarageDoorOpener)
-        .getCharacteristic(Characteristic.CurrentDoorState)
-        .on('get', this.getState.bind(this))
-
-      this.platformAccessory
-        .getService(Service.GarageDoorOpener)
-        .getCharacteristic(Characteristic.TargetDoorState)
-        .on('get', this.getState.bind(this))
+      // this.platformAccessory
+      //   .getService(Service.GarageDoorOpener)
+      //   .getCharacteristic(Characteristic.CurrentDoorState)
+      //   .on('get', this.getState.bind(this))
+      //
+      // this.platformAccessory
+      //   .getService(Service.GarageDoorOpener)
+      //   .getCharacteristic(Characteristic.TargetDoorState)
+      //   .on('get', this.getState.bind(this))
 
       // This is the handler to catch device events
       // This one is always correct!
@@ -94,6 +164,19 @@ module.exports = homebridge => {
         )
     }
 
+    async _pulse() {
+      // If a pulse is already ongoing, don't set another one
+      if (this.isSwitchedOn) {
+        return
+      }
+
+      // Give the pulse, then after pulse time set the switch back to false
+      await this._setSwitch(true)
+      setTimeout(async () => {
+        await this._setSwitch(false)
+      }, this._pulseTime)
+    }
+
     /**
      * Handles changes from HomeKit to the TargetDoorState characteristic.
      */
@@ -103,11 +186,6 @@ module.exports = homebridge => {
       // If the context is shelly then this is an internal update
       // to ensure that homekit is in sync with the current status
       // If not, we really trigger the switch
-      if (context === 'shelly') {
-        callback()
-        return
-      }
-
       this._targetState = newValue
 
       this.log.debug(
@@ -125,10 +203,15 @@ module.exports = homebridge => {
         true
       )
 
-      try {
-        await this._setSwitch(true)
+      if (context === 'ext') {
         callback()
-        this.updateGarageDoorState()
+        return
+      }
+
+      try {
+        await this._pulse()
+        callback()
+        // this.updateGarageDoorState()
       } catch (e) {
         handleFailedRequest(
           this.log,
@@ -162,32 +245,18 @@ module.exports = homebridge => {
       const TDS = Characteristic.TargetDoorState
 
       if (this.currentState === CDS.CLOSED) {
-        this.platformAccessory
-          .getService(Service.GarageDoorOpener)
-          .getCharacteristic(TDS)
-          .setValue(TDS.CLOSED, null, 'shelly')
-        this.platformAccessory
-          .getService(Service.GarageDoorOpener)
-          .setCharacteristic(CDS, CDS.CLOSING)
+        this._setTargetState(TDS.CLOSED, 'ext')
+        this._setCurrentState(CDS.CLOSING)
 
         setTimeout(() => {
-          this.platformAccessory
-            .getService(Service.GarageDoorOpener)
-            .setCharacteristic(CDS, CDS.CLOSED)
+          this._setCurrentState(CDS.CLOSED)
         }, 1000)
       } else {
-        this.platformAccessory
-          .getService(Service.GarageDoorOpener)
-          .getCharacteristic(TDS)
-          .setValue(TDS.OPEN, null, 'shelly')
-        this.platformAccessory
-          .getService(Service.GarageDoorOpener)
-          .setCharacteristic(CDS, CDS.OPENING)
+        this._setTargetState(TDS.OPEN, 'ext')
+        this._setCurrentState(CDS.OPENING)
 
         setTimeout(() => {
-          this.platformAccessory
-            .getService(Service.GarageDoorOpener)
-            .setCharacteristic(CDS, CDS.OPEN)
+          this._setCurrentState(CDS.OPEN)
         }, 1000)
       }
     }

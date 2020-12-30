@@ -14,9 +14,14 @@ module.exports = homebridge => {
     constructor(device, index, config, log) {
       super('garageDoorSwitch', device, index, config, log)
 
+      const movementTime = (config.movementTime || 30) * 1000
+      const pulseTime = config.pulseTime || 300
+
       this.abilities.push(new GarageDoorSwitchAbility(
         'relay' + index,
         'input' + index,
+        movementTime,
+        pulseTime,
         this.setRelay.bind(this)
       ))
     }
